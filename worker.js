@@ -1,5 +1,5 @@
 // ============================================================================
-// MARS VTOL AGENT — CLOUDFLARE WORKER (ОПТИМИЗИРОВАН ПОД GEMINI FREE API)
+// MARS VTOL AGENT — CLOUDFLARE WORKER (ФИКС ОФИЦИАЛЬНОГО GEMINI API)
 // ============================================================================
 
 export default {
@@ -18,61 +18,64 @@ export default {
       return new Response(null, { headers: cors });
     }
 
-    // Отдаём главную страницу (Ваш оригинальный дизайн)
+    // Отдаём главную страницу
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return new Response(HTML, {
         headers: { "Content-Type": "text/html;charset=UTF-8", ...cors },
       });
     }
 
-    // Бэкенд-прокси к бесплатному Gemini API (в формате OpenAI-совместимости)
+    // Бэкенд-прокси к официальному бесплатному Gemini 2.5 API
     if (url.pathname === "/api/chat" && request.method === "POST") {
       try {
         const body = await request.json();
 
-        // Форматируем историю сообщений под стандарт Gemini
-        const formattedMessages = [
-          { role: "system", content: body.system }
-        ];
+        // Склеиваем системный промпт, контекст истории и новое сообщение в один запрос для Gemini
+        let fullPrompt = `${body.system}\n\n`;
         
         if (body.messages && Array.isArray(body.messages)) {
           body.messages.forEach(msg => {
-            formattedMessages.push({
-              role: msg.role === "assistant" ? "assistant" : "user",
-              content: msg.content
-            });
+            const roleName = msg.role === "assistant" ? "Агент" : "Инженер";
+            fullPrompt += `${roleName}: ${msg.content}\n`;
           });
+        } else {
+          fullPrompt += `Инженер: ${body.message || "Сделай отчет"}\n`;
         }
+        
+        fullPrompt += "\nАгент:";
 
+        // Payload по официальной спецификации Google AI Studio
         const geminiPayload = {
-          model: "gemini-2.5-flash",
-          messages: formattedMessages,
-          // Автоматически подключаем живой поиск Google для фактчекинга NASA/arXiv
+          contents: [{
+            parts: [{ text: fullPrompt }]
+          }],
+          // Подключаем встроенный поиск Google для работы с NASA/arXiv данными
           tools: [{ googleSearch: {} }]
         };
 
-        // Делаем запрос к бесплатному шлюзу Google AI Studio
-        const resp = await fetch("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", {
+        // Запрос к родному эндпоинту Gemini 2.5 Flash
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${env.GEMINI_API_KEY}`
+            "Content-Type": "application/json"
           },
           body: JSON.stringify(geminiPayload)
         });
 
         if (!resp.ok) {
           const errText = await resp.text();
-          return new Response(JSON.stringify({ error: { message: `Gemini Error: ${errText}` } }), {
+          return new Response(JSON.stringify({ error: { message: `Gemini API Error: ${errText}` } }), {
             status: resp.status,
             headers: { "Content-Type": "application/json", ...cors },
           });
         }
 
         const data = await resp.json();
-        const aiText = data.choices?.[0]?.message?.content || "Ошибка получения ответа.";
+        
+        // Достаем текст ответа по структуре Google API
+        const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || "Ошибка разбора ответа ИИ.";
 
-        // Трансформируем ответ в формат, который ожидает ваш фронтенд
+        // Упаковываем строго в том формате, который ищет ваш фронтенд во встроенном скрипте
         const responseToFrontend = {
           content: [
             {
